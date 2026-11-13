@@ -105,7 +105,10 @@ fn account_windows(hosts:&[HWND],mains:&[HWND],parents:&std::collections::HashMa
 #[cfg(test)]
 mod tests{
     use super::*;
+    // 不在 CI 里算通过：windows-11-arm 上 NIM_ADD 返回 FALSE 且 GetLastError=0，后续断言不会执行。
+    // 归并行为由 single_tray_account_drops_auxiliary_mains_without_a_live_icon 覆盖。本地有通知区域时用 --ignored 运行，失败仍然中止。
     #[test]
+    #[ignore = "需要系统通知区域。windows-11-arm 上 Shell_NotifyIconW(NIM_ADD) 返回 FALSE 且 GetLastError=0，夹具断言未执行"]
     fn qq_single_tray_account_ignores_its_auxiliary_main_windows(){unsafe{
         use windows::Win32::{Foundation::{GetLastError,LRESULT},System::LibraryLoader::GetModuleHandleW,UI::{Shell::*,WindowsAndMessaging::{DispatchMessageW,PeekMessageW,TranslateMessage,MSG,PM_REMOVE,WS_EX_TOOLWINDOW}}};
         unsafe extern "system" fn proc(h:HWND,m:u32,w:WPARAM,l:LPARAM)->LRESULT{DefWindowProcW(h,m,w,l)}
