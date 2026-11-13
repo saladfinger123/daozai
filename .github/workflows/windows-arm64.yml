@@ -1,0 +1,41 @@
+name: Windows ARM64
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+  actions: write
+jobs:
+  package:
+    runs-on: windows-11-arm
+    env:
+      CARGO_BUILD_JOBS: 1
+    steps:
+      - uses: actions/checkout@v4
+      - name: 安装 Rust stable
+        run: rustup toolchain install stable --profile minimal --target aarch64-pc-windows-msvc
+      - name: 确认原生 ARM64 工具链
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          rustup run stable rustc --version --verbose
+          $hostLine = rustup run stable rustc --version --verbose | Select-String '^host:'
+          if ($hostLine -notmatch 'aarch64-pc-windows-msvc') {
+            throw '此任务必须运行在原生 aarch64-pc-windows-msvc，不能把 x64 模拟当成 ARM64'
+          }
+          clang --version
+          if ($LASTEXITCODE -ne 0) { throw 'ring 在 Windows ARM64 上需要 clang' }
+      - name: 测试
+        run: cargo +stable test --locked --all-targets --features record --target aarch64-pc-windows-msvc -- --test-threads=1
+      - name: 打包 ARM64 便携 ZIP 并核对 PE
+        shell: pwsh
+        run: ./scripts/package.ps1 -Architecture arm64
+      - name: 上传便携包与 PE 审计
+        uses: actions/upload-artifact@v4
+        with:
+          name: daozai-windows-arm64
+          path: |
+            dist/*.zip
+            dist/SHA256SUMS.txt
+            dist/runtime-audit.txt
+          if-no-files-found: error

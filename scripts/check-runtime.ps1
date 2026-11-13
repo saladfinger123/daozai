@@ -1,5 +1,10 @@
-﻿param([Parameter(Mandatory=$true)][string]$Executable)
+﻿param(
+    [Parameter(Mandatory=$true)][string]$Executable,
+    [ValidateSet('x64', 'arm64')][string]$Architecture = 'x64'
+)
 $ErrorActionPreference = 'Stop'
+$expectedMachine = if ($Architecture -eq 'arm64') { [uint16]0xAA64 } else { [uint16]0x8664 }
+$label = if ($Architecture -eq 'arm64') { 'Windows ARM64' } else { 'Windows x64' }
 $stream = [IO.File]::OpenRead([IO.Path]::GetFullPath($Executable))
 $reader = [IO.BinaryReader]::new($stream)
 try {
@@ -7,7 +12,11 @@ try {
     $stream.Position = 0x3c
     $pe = $reader.ReadUInt32()
     $stream.Position = $pe
-    if ($reader.ReadUInt32() -ne 0x4550 -or $reader.ReadUInt16() -ne 0x8664) { throw '发布程序必须是 Windows x64' }
+    $signature = $reader.ReadUInt32()
+    $machine = $reader.ReadUInt16()
+    if ($signature -ne 0x4550 -or $machine -ne $expectedMachine) {
+        throw "发布程序必须是 $label（PE 机器类型 0x$($expectedMachine.ToString('X4'))，实际 0x$($machine.ToString('X4'))）"
+    }
     $sectionCount = $reader.ReadUInt16()
     $stream.Position = $pe + 20
     $optionalSize = $reader.ReadUInt16()
@@ -50,5 +59,7 @@ try {
     }
     $runtime = @($dependencies | Where-Object { $_ -match '^(vcruntime|msvcp|msvcr|api-ms-win-crt-).*\.dll$' })
     if ($runtime.Count) { throw ('发布程序仍依赖外部 C/C++ 运行库：' + ($runtime -join ', ')) }
-    Write-Output '运行库检查通过：Windows x64，无外部 C/C++ 运行库依赖。'
+    Write-Output "运行库检查通过：$label，无外部 C/C++ 运行库依赖。"
+    Write-Output ("PE 机器类型 0x{0:X4}" -f $machine)
+    Write-Output ('导入模块：' + (($dependencies | Sort-Object -Unique) -join ', '))
 } finally { $reader.Dispose(); $stream.Dispose() }

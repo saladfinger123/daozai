@@ -10,6 +10,21 @@ $staged = Join-Path $targetDir ('daozai-update-' + [Guid]::NewGuid().ToString('N
 $backup = Join-Path $workRoot 'previous.exe'
 $replaced = $false
 $exited = $false
+function Read-PeIdentity([string]$Path) {
+    $stream = [IO.File]::OpenRead($Path)
+    $reader = [IO.BinaryReader]::new($stream)
+    try {
+        if ($reader.ReadUInt16() -ne 0x5A4D) { throw '更新包不是有效的 Windows 程序。' }
+        $stream.Position = 0x3C
+        $pe = $reader.ReadUInt32()
+        if ($pe -gt ($stream.Length - 26)) { throw '更新包不是有效的 Windows 程序。' }
+        $stream.Position = $pe
+        if ($reader.ReadUInt32() -ne 0x4550) { throw '更新包不是有效的 Windows 程序。' }
+        $machine = $reader.ReadUInt16()
+        $stream.Position = $pe + 24
+        return @{ Machine = $machine; Magic = $reader.ReadUInt16() }
+    } finally { $reader.Dispose(); $stream.Dispose() }
+}
 function Assert-PlainPath([string]$PathToCheck) {
     $ancestor = [IO.Path]::GetFullPath($PathToCheck)
     while ($ancestor) {
@@ -24,17 +39,27 @@ try {
     if (-not (Test-Path -LiteralPath $target -PathType Leaf)) { throw '找不到当前程序。' }
     $version = (Get-Content -LiteralPath (Join-Path $workRoot 'version.txt') -Raw).Trim()
     if ($version -notmatch '^\d+\.\d+\.\d+$') { throw '更新版本号无效。' }
+    # 未写 arch.txt 时保持原来的 x64 包路径。ARM64 程序会写入 windows-arm64，且不接受 x64 路径。
+    $suffix = 'windows-x64'
+    $archPath = Join-Path $workRoot 'arch.txt'
+    if (Test-Path -LiteralPath $archPath) {
+        $suffix = (Get-Content -LiteralPath $archPath -Raw).Trim()
+        if ($suffix -ne 'windows-x64' -and $suffix -ne 'windows-arm64') { throw '更新架构无效。' }
+    }
+    $expectedMachine = if ($suffix -eq 'windows-arm64') { [uint16]0xAA64 } else { [uint16]0x8664 }
     $archive = Join-Path $workRoot 'update.zip'
     $expectedHash = (Get-Content -LiteralPath (Join-Path $workRoot 'hash.txt') -Raw).Trim()
     if ($expectedHash -notmatch '^[a-fA-F0-9]{64}$' -or (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash -ne $expectedHash) { throw '更新包校验失败。' }
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     $zip = [IO.Compression.ZipFile]::OpenRead($archive)
     try {
-        $name = 'Daozai-v' + $version + '-windows-x64/daozai.exe'
+        $name = 'Daozai-v' + $version + '-' + $suffix + '/daozai.exe'
         $entries = @($zip.Entries | Where-Object {$_.FullName.Replace('\','/') -ceq $name})
         if ($entries.Count -ne 1 -or $entries[0].Length -gt 200MB) { throw '更新包中缺少唯一的岛仔程序。' }
         [IO.Compression.ZipFileExtensions]::ExtractToFile($entries[0], $staged)
     } finally { $zip.Dispose() }
+    $identity = Read-PeIdentity $staged
+    if ($identity.Magic -ne 0x20B -or $identity.Machine -ne $expectedMachine) { throw '更新包架构与声明不一致。' }
     $actual = [Diagnostics.FileVersionInfo]::GetVersionInfo($staged).FileVersion
     if ($actual -ne $version -and $actual -ne "$version.0") { throw '安装包版本不匹配。' }
     Set-Content -LiteralPath (Join-Path $workRoot 'ready') -Value 'ok'
