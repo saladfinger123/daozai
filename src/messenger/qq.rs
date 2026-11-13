@@ -77,18 +77,7 @@ pub(crate) fn accounts(paths:&[String])->Option<Vec<Target>>{unsafe{
     EnumWindows(Some(visit),LPARAM((&mut search as *mut Search)as isize)).ok()?;
     if search.hosts.is_empty() && search.mains.is_empty(){return Some(Vec::new());}
     for &host in &search.hosts{if host_icons(&[(window_pid(host),host)],window_pid(host)).len()!=1{return None;}}
-    let owners:Vec<_>=search.hosts.iter().map(|&hwnd|window_pid(hwnd)).collect();
-    let parents=parent_processes();let mut windows=search.hosts;let mut main_pids=std::collections::HashSet::new();
-    // 已由唯一托盘图标确认的账号，其主窗口和隐藏辅助窗口不再重复计数。
-    for main in search.mains{
-        let pid=window_pid(main);
-        if account_tray_pid(pid,&owners,&parents).is_none(){
-            // 有相关宿主却无法唯一归属时，不把公共主进程再猜成一个账号。
-            if owners.iter().any(|owner|ancestors(*owner,&parents).contains(&pid)){return None;}
-            if !main_pids.insert(pid){return None;}
-            if !windows.iter().any(|&hwnd|window_pid(hwnd)==pid){windows.push(main);}
-        }
-    }
+    let windows=account_windows(&search.hosts,&search.mains,&parent_processes(),window_pid)?;
     windows.into_iter().map(|hwnd|{
         let pid=window_pid(hwnd);
         let process=windows::core::Owned::new(OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION,false,pid).ok()?);
@@ -96,19 +85,36 @@ pub(crate) fn accounts(paths:&[String])->Option<Vec<Target>>{unsafe{
     }).collect()
 }}
 
+/// 每个托盘宿主都已确认只有一个图标。属于该账号的主窗口和隐藏辅助窗口不再另计；
+/// 多个宿主共享的上级进程不能再被猜成一个账号。
+fn account_windows(hosts:&[HWND],mains:&[HWND],parents:&std::collections::HashMap<u32,u32>,mut pid:impl FnMut(HWND)->u32)->Option<Vec<HWND>>{
+    let mut owners=Vec::with_capacity(hosts.len());
+    for &host in hosts{owners.push(pid(host));}
+    let mut windows=hosts.to_vec();let mut main_pids=std::collections::HashSet::new();
+    for &main in mains{
+        let id=pid(main);
+        if account_tray_pid(id,&owners,parents).is_none(){
+            if owners.iter().any(|owner|ancestors(*owner,parents).contains(&id)){return None;}
+            if !main_pids.insert(id){return None;}
+            if !windows.iter().any(|&hwnd|pid(hwnd)==id){windows.push(main);}
+        }
+    }
+    Some(windows)
+}
+
 #[cfg(test)]
 mod tests{
     use super::*;
     #[test]
     fn qq_single_tray_account_ignores_its_auxiliary_main_windows(){unsafe{
-        use windows::Win32::{Foundation::{GetLastError,LRESULT},System::LibraryLoader::GetModuleHandleW,UI::{Shell::*,WindowsAndMessaging::{DispatchMessageW,PeekMessageW,TranslateMessage,MSG,PM_REMOVE}}};
+        use windows::Win32::{Foundation::{GetLastError,LRESULT},System::LibraryLoader::GetModuleHandleW,UI::{Shell::*,WindowsAndMessaging::{DispatchMessageW,PeekMessageW,TranslateMessage,MSG,PM_REMOVE,WS_EX_TOOLWINDOW}}};
         unsafe extern "system" fn proc(h:HWND,m:u32,w:WPARAM,l:LPARAM)->LRESULT{DefWindowProcW(h,m,w,l)}
         struct Fixture{windows:Vec<HWND>,icon:NOTIFYICONDATAW}
         impl Drop for Fixture{fn drop(&mut self){unsafe{let _=Shell_NotifyIconW(NIM_DELETE,&self.icon);for &window in &self.windows{let _=DestroyWindow(window);}}}}
         let instance=GetModuleHandleW(None).unwrap().into();
         for class in [w!("Chrome_WidgetWin_1"),w!("Electron_NotifyIconHostWindow")]{RegisterClassW(&WNDCLASSW{lpfnWndProc:Some(proc),hInstance:instance,lpszClassName:class,..Default::default()});}
-        // 消息专用窗口。Windows 11 会拒绝离屏零尺寸弹窗作为托盘宿主。
-        let host=CreateWindowExW(WINDOW_EX_STYLE(0),w!("Electron_NotifyIconHostWindow"),w!(""),WS_POPUP,0,0,0,0,HWND(-3isize as *mut std::ffi::c_void),None,instance,None).unwrap();
+        // 与正式托盘窗口相同：工具窗口、零尺寸，但不放到屏幕外。Windows 11 会拒绝离屏零尺寸弹窗。
+        let host=CreateWindowExW(WS_EX_TOOLWINDOW,w!("Electron_NotifyIconHostWindow"),w!("QQ"),WS_POPUP,0,0,0,0,None,None,instance,None).unwrap();
         let mut tip=[0u16;128];
         for (i,unit) in "QQ".encode_utf16().enumerate(){tip[i]=unit;}
         let mut fixture=Fixture{windows:vec![host],icon:NOTIFYICONDATAW{cbSize:std::mem::size_of::<NOTIFYICONDATAW>() as u32,hWnd:host,uID:3,uFlags:NIF_ICON|NIF_MESSAGE|NIF_TIP,hIcon:LoadIconW(None,IDI_APPLICATION).unwrap(),uCallbackMessage:WM_APP+1,szTip:tip,..Default::default()}};
@@ -124,10 +130,8 @@ mod tests{
             }
             false
         };
-        // windows-11-arm 的会话可能没有通知区域。能加上图标时仍检查账号归并；加不上时不能把环境限制当成架构回归。
         if !add(&fixture.icon){
-            eprintln!("Shell_NotifyIconW(NIM_ADD) 失败，GetLastError={:?}。当前会话没有可用通知区域，跳过 QQ 托盘夹具。",unsafe{GetLastError()});
-            return;
+            panic!("Shell_NotifyIconW(NIM_ADD) 失败，GetLastError={:?}。通知区域夹具未执行后续断言。",unsafe{GetLastError()});
         }
         for (style,width,height) in [(0x04c70000,800,600),(0x04c20000,280,44),(WS_OVERLAPPEDWINDOW.0,400,500)]{
             fixture.windows.push(CreateWindowExW(WINDOW_EX_STYLE(0),w!("Chrome_WidgetWin_1"),w!(""),WINDOW_STYLE(style),-10000,-10000,width,height,None,None,instance,None).unwrap());
@@ -141,10 +145,29 @@ mod tests{
         history.observe(10,Some(found.clone()));history.observe(20,Some(found));
         assert_eq!(history.target(1,15,|target|ready_with_paths(target,&paths)).unwrap().unread.window,host.0 as isize);
         let mut second=fixture.icon;second.uID=4;
-        assert!(Shell_NotifyIconW(NIM_ADD,&second).as_bool());
+        if !add(&second){panic!("第二个托盘图标添加失败，GetLastError={:?}。",unsafe{GetLastError()});}
         let ambiguous=accounts(&paths);let _=Shell_NotifyIconW(NIM_DELETE,&second);
         assert!(ambiguous.is_none(),"同宿主多个账号图标仍不能假装只有一个账号");
     }}
+    #[test]
+    fn single_tray_account_drops_auxiliary_mains_without_a_live_icon(){
+        let hwnd=|n:usize|HWND(n as *mut std::ffi::c_void);
+        let host=hwnd(1);let mains=[hwnd(2),hwnd(3),hwnd(4)];
+        let same=|window:HWND|if window==host||mains.contains(&window){7}else{0};
+        assert_eq!(account_windows(&[host],&mains,&std::collections::HashMap::new(),same).unwrap(),vec![host]);
+        let mut parents=std::collections::HashMap::new();parents.insert(8,7);
+        let child=hwnd(5);
+        let child_pid=|window:HWND|if window==host{7}else{8};
+        assert_eq!(account_windows(&[host],&[child],&parents,child_pid).unwrap(),vec![host]);
+        parents.insert(21,10);parents.insert(22,10);
+        let hosts=[hwnd(6),hwnd(7)];let shared=hwnd(8);
+        let shared_pid=|window:HWND|match window.0 as usize{6=>21,7=>22,_=>10};
+        assert!(account_windows(&hosts,&[shared],&parents,shared_pid).is_none(),"多个托盘宿主的公共上级不能再当成一个账号");
+        let target=Target{unread:Unread{source:Messenger::Qq,pid:7,window:host.0 as isize},started:1};
+        let mut history=super::super::AccountHistory::new(Messenger::Qq);
+        history.observe(10,Some(vec![target]));history.observe(20,Some(vec![target]));
+        assert_eq!(history.target(1,15,|_|true).unwrap().unread.window,host.0 as isize);
+    }
     #[test]
     fn qq_multiple_main_windows_in_one_process_are_not_a_unique_account(){unsafe{
         use windows::{core::w,Win32::{Foundation::LRESULT,System::LibraryLoader::GetModuleHandleW}};
