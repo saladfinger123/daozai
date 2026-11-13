@@ -214,6 +214,7 @@ impl Connect {
     }
     #[test]
     #[ignore="手动验证默认浏览器官网登录，需用户完成登录"]
+    #[cfg(windows)]
     fn workbuddy_login_without_extension(){
         let config=super::super::Config::load();
         let expected=config.accounts.iter().find(|a|a.enabled&&a.provider==super::super::Provider::WorkBuddy).and_then(|a|a.slot.as_deref());

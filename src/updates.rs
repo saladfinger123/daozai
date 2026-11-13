@@ -6,6 +6,51 @@ const REPOSITORY: &str = "https://github.com/Renly1994/xiaotang-daozai";
 const API: &str = "https://api.github.com/repos/Renly1994/xiaotang-daozai/releases/latest";
 const RELEASES: &str = "https://github.com/Renly1994/xiaotang-daozai/releases/latest";
 const BACKUP_DOWNLOAD: &str = "https://pan.quark.cn/s/0a39b4e1f332";
+const FORK_REPOSITORY: &str = "https://github.com/saladfinger123/daozai";
+const FORK_API: &str = "https://api.github.com/repos/saladfinger123/daozai/releases/latest";
+const FORK_RELEASES: &str = "https://github.com/saladfinger123/daozai/releases/latest";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PackageArch { X64, Arm64 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct UpdateChannel {
+    arch: PackageArch,
+    repository: &'static str,
+    api: &'static str,
+    releases: &'static str,
+    asset_suffix: &'static str,
+    backup: Option<&'static str>,
+}
+
+fn channel(arch: PackageArch) -> UpdateChannel {
+    match arch {
+        PackageArch::X64 => UpdateChannel {
+            arch, repository: REPOSITORY, api: API, releases: RELEASES,
+            asset_suffix: "windows-x64", backup: Some(BACKUP_DOWNLOAD),
+        },
+        // ARM64 只认本仓库的 windows-arm64 压缩包，不回落到上游 x64。
+        PackageArch::Arm64 => UpdateChannel {
+            arch, repository: FORK_REPOSITORY, api: FORK_API, releases: FORK_RELEASES,
+            asset_suffix: "windows-arm64", backup: None,
+        },
+    }
+}
+
+fn current_channel() -> UpdateChannel {
+    channel(if cfg!(all(windows, target_arch = "aarch64")) { PackageArch::Arm64 } else { PackageArch::X64 })
+}
+
+fn portable_zip_name(version: &str, channel: &UpdateChannel) -> String {
+    format!("Daozai-v{}-{}.zip", version.trim_start_matches('v'), channel.asset_suffix)
+}
+
+fn manual_download_hint(channel: &UpdateChannel) -> &'static str {
+    match channel.arch {
+        PackageArch::Arm64 => "没有本仓库的 Windows ARM64 便携包，不会下载 x64。",
+        PackageArch::X64 => "此版本请通过浏览器下载。",
+    }
+}
 
 #[derive(Clone, Debug)]
 struct Release { version: String, notes: String, page: String, package: Option<Package> }
@@ -86,7 +131,7 @@ impl State {
                 }
             }
             Some(Ok(None)) => { ui.label("当前已是最新版本"); }
-            Some(Err(message)) => { ui.label(message); ui.hyperlink_to("打开发布页", RELEASES); }
+            Some(Err(message)) => { ui.label(message); ui.hyperlink_to("打开发布页", current_channel().releases); }
             None if self.rx.is_some() => { ui.label("正在检查…"); }
             _ => {}
         }
@@ -209,13 +254,15 @@ impl State {
                         }
                         ui.add_space(2.0);
                         ui.horizontal(|ui| {
-                            ui.hyperlink_to(egui::RichText::new("网盘下载").size(11.5).color(theme::BLUE),BACKUP_DOWNLOAD);
-                            ui.label(egui::RichText::new("·").color(theme::DIM));
+                            if let Some(backup) = current_channel().backup {
+                                ui.hyperlink_to(egui::RichText::new("网盘下载").size(11.5).color(theme::BLUE), backup);
+                                ui.label(egui::RichText::new("·").color(theme::DIM));
+                            }
                             ui.hyperlink_to(egui::RichText::new("浏览器下载").size(11.5).color(theme::GRAY),&release.page);
                             ui.label(egui::RichText::new("·").color(theme::DIM));
                             ui.hyperlink_to(egui::RichText::new("查看发布说明").size(11.5).color(theme::GRAY),&release.page);
                         });
-                        if release.package.is_none() { ui.label(egui::RichText::new("此版本请通过浏览器下载。").size(11.5).color(theme::DIM)); }
+                        if release.package.is_none() { ui.label(egui::RichText::new(manual_download_hint(&current_channel())).size(11.5).color(theme::DIM)); }
                     });
                     if self.rx.is_some() { ctx.request_repaint_after(Duration::from_millis(100)); }
                 });
@@ -299,8 +346,9 @@ fn http_agent() -> Result<ureq::Agent, String> {
 }
 
 fn check() -> Result<Option<Release>, String> {
+    let channel = current_channel();
     let response = http_agent()?
-        .get(API).set("User-Agent", concat!("Daozai/", env!("CARGO_PKG_VERSION")))
+        .get(channel.api).set("User-Agent", concat!("Daozai/", env!("CARGO_PKG_VERSION")))
         .set("Accept", "application/vnd.github+json").call().map_err(|error| match error {
             ureq::Error::Status(403 | 429, _) => "检查过于频繁，请稍后重试".to_owned(),
             ureq::Error::Status(404, _) => "暂未找到正式版本，请查看发布页".to_owned(),
@@ -312,9 +360,13 @@ fn check() -> Result<Option<Release>, String> {
 }
 
 fn release_info(value: &serde_json::Value, current: &str) -> Result<Option<Release>, String> {
+    release_info_for(value, current, current_channel())
+}
+
+fn release_info_for(value: &serde_json::Value, current: &str, channel: UpdateChannel) -> Result<Option<Release>, String> {
     let Some(tag) = parse_release(value, current)? else { return Ok(None); };
-    let name = format!("Daozai-v{}-windows-x64.zip", tag.trim_start_matches('v'));
-    let expected = format!("{REPOSITORY}/releases/download/{tag}/{name}");
+    let name = portable_zip_name(&tag, &channel);
+    let expected = format!("{}/releases/download/{tag}/{name}", channel.repository);
     let package = value["assets"].as_array().and_then(|assets| assets.iter().find(|asset| asset["name"] == name))
         .and_then(|asset| {
             let hash = asset["digest"].as_str()?.strip_prefix("sha256:")?;
@@ -323,7 +375,7 @@ fn release_info(value: &serde_json::Value, current: &str) -> Result<Option<Relea
                 && hash.len() == 64 && hash.bytes().all(|c| c.is_ascii_hexdigit()))
                 .then(|| Package { url: expected, size, hash: hash.to_ascii_lowercase() })
         });
-    Ok(Some(Release { page: format!("{REPOSITORY}/releases/tag/{tag}"), version: tag,
+    Ok(Some(Release { page: format!("{}/releases/tag/{tag}", channel.repository), version: tag,
         notes: value["body"].as_str().unwrap_or("").to_owned(), package }))
 }
 
@@ -342,6 +394,7 @@ fn download(release: &Release, tx: &mpsc::Sender<Event>, cancel: &AtomicBool) ->
         std::fs::write(work.join("apply.ps1"), concat!("\u{feff}", include_str!("../installer/update.ps1"))).map_err(|_| "无法准备更新程序")?;
         std::fs::write(work.join("version.txt"), release.version.trim_start_matches('v')).map_err(|_| "无法保存更新信息")?;
         std::fs::write(work.join("hash.txt"), &package.hash).map_err(|_| "无法保存校验信息")?;
+        std::fs::write(work.join("arch.txt"), current_channel().asset_suffix).map_err(|_| "无法保存更新架构")?;
         if cancel.load(Ordering::Relaxed) { return Err("下载已取消".into()); }
         Ok(work.clone())
     })();
@@ -499,20 +552,56 @@ mod tests {
         }
         assert!(parse_release(&serde_json::json!({}), "0.6.39").is_err());
     }
+    fn verified_asset(name: &str, url: &str) -> serde_json::Value {
+        serde_json::json!({"name":name,"browser_download_url":url,"size":123,"digest":format!("sha256:{}", "ab".repeat(32))})
+    }
     #[test]
     fn only_matching_verified_windows_package_can_install() {
+        let x64 = channel(PackageArch::X64);
         let mut value = release("v0.6.40");
         value["body"] = "更新说明".into();
-        value["assets"] = serde_json::json!([{"name":"Daozai-v0.6.40-windows-x64.zip",
-            "browser_download_url":format!("{REPOSITORY}/releases/download/v0.6.40/Daozai-v0.6.40-windows-x64.zip"),
-            "size":123,"digest":format!("sha256:{}", "a".repeat(64))}]);
-        let parsed = release_info(&value, "0.6.39").unwrap().unwrap();
+        let name = portable_zip_name("v0.6.40", &x64);
+        assert_eq!(name, "Daozai-v0.6.40-windows-x64.zip");
+        let url = format!("{REPOSITORY}/releases/download/v0.6.40/{name}");
+        value["assets"] = serde_json::json!([verified_asset(&name, &url)]);
+        let parsed = release_info_for(&value, "0.6.39", x64).unwrap().unwrap();
         assert!(parsed.package.is_some()); assert_eq!(parsed.notes, "更新说明");
+        assert_eq!(parsed.page, format!("{REPOSITORY}/releases/tag/v0.6.40"));
+        assert_eq!(manual_download_hint(&x64), "此版本请通过浏览器下载。");
+        assert_eq!(x64.backup, Some(BACKUP_DOWNLOAD));
         for (field, bad) in [("name", serde_json::json!("source.zip")), ("browser_download_url", serde_json::json!("https://example.com/download.zip")),
             ("digest", serde_json::Value::Null), ("digest", serde_json::json!("sha256:bad")), ("size", serde_json::json!(0))] {
             let mut invalid = value.clone(); invalid["assets"][0][field] = bad;
-            assert!(release_info(&invalid, "0.6.39").unwrap().unwrap().package.is_none());
+            assert!(release_info_for(&invalid, "0.6.39", x64).unwrap().unwrap().package.is_none());
         }
+    }
+    #[test]
+    fn arm64_update_accepts_only_this_forks_arm64_zip() {
+        let arm = channel(PackageArch::Arm64);
+        assert_eq!(arm.repository, FORK_REPOSITORY);
+        assert_eq!(arm.api, FORK_API);
+        assert_eq!(arm.backup, None);
+        assert_eq!(manual_download_hint(&arm), "没有本仓库的 Windows ARM64 便携包，不会下载 x64。");
+        let name = portable_zip_name("0.6.64", &arm);
+        assert_eq!(name, "Daozai-v0.6.64-windows-arm64.zip");
+        let url = format!("{FORK_REPOSITORY}/releases/download/v0.6.64/{name}");
+        let mut value = release("v0.6.64");
+        value["assets"] = serde_json::json!([
+            verified_asset("Daozai-v0.6.64-windows-x64.zip", &format!("{FORK_REPOSITORY}/releases/download/v0.6.64/Daozai-v0.6.64-windows-x64.zip")),
+            verified_asset("Daozai-v0.6.64-windows-x64.zip", &format!("{REPOSITORY}/releases/download/v0.6.64/Daozai-v0.6.64-windows-x64.zip")),
+            verified_asset("Daozai-Setup-v0.6.64-x64.exe", &format!("{REPOSITORY}/releases/download/v0.6.64/Daozai-Setup-v0.6.64-x64.exe")),
+            verified_asset(&name, &format!("{REPOSITORY}/releases/download/v0.6.64/{name}")),
+        ]);
+        let rejected = release_info_for(&value, "0.6.63", arm).unwrap().unwrap();
+        assert!(rejected.package.is_none(), "上游或 x64 资源不能当作 ARM64 更新");
+        assert_eq!(rejected.page, format!("{FORK_REPOSITORY}/releases/tag/v0.6.64"));
+        value["assets"][3]["browser_download_url"] = url.clone().into();
+        let accepted = release_info_for(&value, "0.6.63", arm).unwrap().unwrap();
+        let package = accepted.package.expect("只接受本仓库 ARM64 压缩包");
+        assert_eq!(package.url, url);
+        let mut only_arm = release("v0.6.64");
+        only_arm["assets"] = serde_json::json!([verified_asset(&name, &url)]);
+        assert!(release_info_for(&only_arm, "0.6.63", channel(PackageArch::X64)).unwrap().unwrap().package.is_none());
     }
     #[test]
     fn download_rejects_truncation_corruption_excess_and_cancellation() {

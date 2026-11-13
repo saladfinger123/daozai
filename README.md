@@ -133,7 +133,9 @@ Windows 桌面伙伴，把消息、音乐、日程、天气和 AI 额度放到�
 
 **更新**：设置 → 关于 → 检查更新。支持应用内下载、校验后重启更新，也可从发布页下载覆盖安装；升级保留原设置和数据，卸载同样保留用户数据。下载窗口提供夸克网盘备用入口。
 
-**系统**：Windows 10／11 x64。默认使用 OpenGL，初始化失败时自动尝试 Direct3D 12。Windows 11 已进行本机实测，Windows 10、不同显卡及多屏组合仍需更多反馈。暂不提供 macOS、Linux 或 ARM64 成品包。
+**系统**：Windows 10／11 x64。默认使用 OpenGL，初始化失败时自动尝试 Direct3D 12。Windows 11 已进行本机实测，Windows 10、不同显卡及多屏组合仍需更多反馈。暂不提供 macOS 或 Linux 成品包。
+
+Windows ARM64 只提供便携包 `Daozai-v版本号-windows-arm64.zip`（`aarch64-pc-windows-msvc`）。其中的 `daozai.exe` 应为 PE32+、机器类型 `0xAA64`。不附带 NSIS 安装器：NSIS 3.13 生成的安装程序本体是 32 位，在 ARM64 上要靠模拟运行。ARM64 应用内更新只接受本仓库的 `windows-arm64` 压缩包，不会改用上游 x64 包。尚未在具体 ARM 设备上做运行实测。
 
 当前程序未做商业代码签名，Windows 可能提示未知发布者；请核对仓库来源与文件校验值。更多操作见 [使用指南](docs/USAGE.md)。
 
@@ -175,6 +177,8 @@ rustup default stable-x86_64-pc-windows-msvc
 cargo build --locked --release --bin daozai
 .\target\release\daozai.exe
 ```
+
+Windows ARM64 使用 `aarch64-pc-windows-msvc`。在 ARM64 本机可执行 `powershell -File .\scripts\package.ps1 -Architecture arm64`，产物是便携 ZIP，不是安装器。
 
 运行测试及打包：
 

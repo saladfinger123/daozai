@@ -13,7 +13,7 @@ try {
     $source = Join-Path $testRoot 'fixture.cs'
     '[assembly:System.Reflection.AssemblyFileVersion("9.8.7")] class Fixture { static void Main() { System.IO.File.WriteAllText(System.IO.Path.Combine(System.AppDomain.CurrentDomain.BaseDirectory,"started.txt"),"ok"); } }' | Set-Content -LiteralPath $source
     $fixture = Join-Path $testRoot 'fixture.exe'
-    & $compiler /nologo /target:winexe "/out:$fixture" $source
+    & $compiler /nologo /target:winexe /platform:x64 "/out:$fixture" $source
     if ($LASTEXITCODE -ne 0) { throw '测试程序编译失败' }
     $installer = Join-Path $testRoot 'apply.ps1'
     [IO.File]::WriteAllText($installer, [IO.File]::ReadAllText((Join-Path $project 'installer\update.ps1')), [Text.UTF8Encoding]::new($true))
@@ -23,7 +23,7 @@ try {
     $data = Join-Path $targetDir 'settings.json'
     Set-Content -LiteralPath $data -Value 'keep-user-data'
     Add-Type -AssemblyName System.IO.Compression.FileSystem
-    foreach ($case in @('success','inherited-shell','bad-hash','wrong-version','traversal')) {
+    foreach ($case in @('success','inherited-shell','bad-hash','wrong-version','traversal','arm64-wrong-entry','arm64-x64-payload')) {
         Remove-Item -LiteralPath (Join-Path $targetDir 'started.txt') -ErrorAction SilentlyContinue
         Set-Content -LiteralPath $target -Value 'previous-program'
         $before = (Get-FileHash -LiteralPath $target).Hash
@@ -32,7 +32,8 @@ try {
         $archive = Join-Path $work 'update.zip'
         $zip = [IO.Compression.ZipFile]::Open($archive, [IO.Compression.ZipArchiveMode]::Create)
         $version = if ($case -eq 'wrong-version') {'9.8.8'} else {'9.8.7'}
-        $entry = if ($case -eq 'traversal') {'../daozai.exe'} else {"Daozai-v$version-windows-x64/daozai.exe"}
+        $entry = if ($case -eq 'traversal') {'../daozai.exe'} elseif ($case -eq 'arm64-x64-payload') {"Daozai-v$version-windows-arm64/daozai.exe"} else {"Daozai-v$version-windows-x64/daozai.exe"}
+        if ($case -like 'arm64-*') { Set-Content -LiteralPath (Join-Path $work 'arch.txt') -Value 'windows-arm64' }
         [IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zip, $fixture, $entry) | Out-Null
         $zip.Dispose()
         Set-Content -LiteralPath (Join-Path $work 'version.txt') -Value $version
